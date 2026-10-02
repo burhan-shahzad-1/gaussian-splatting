@@ -342,24 +342,51 @@ export async function mountLookAround(
     let pinchStart = 0;
     let pinchZoom = 1;
 
-    function samplePair(heading: number) {
+    function sampleStill(heading: number) {
       const count = strip.length;
-      if (count <= 1) return { a: strip[0], b: strip[0], mix: 0 };
+      if (count <= 1) return strip[0];
       if (wrapAround) {
-        const f = wrap01(heading) * count;
-        const i0 = Math.floor(f) % count;
-        const i1 = (i0 + 1) % count;
-        return { a: strip[i0], b: strip[i1], mix: f - Math.floor(f) };
+        const index = Math.round(wrap01(heading) * count) % count;
+        return strip[index];
       }
-      const f = clamp(heading, 0, 1) * (count - 1);
-      const i0 = Math.floor(f);
-      const i1 = Math.min(i0 + 1, count - 1);
-      return { a: strip[i0], b: strip[i1], mix: f - i0 };
+      const index = clamp(Math.round(clamp(heading, 0, 1) * (count - 1)), 0, count - 1);
+      return strip[index];
     }
 
     function clampHeading(value: number) {
       if (wrapAround) return wrap01(value);
       return clamp(value, 0, 1);
+    }
+
+    function paintFrame(view: ReturnType<typeof limits>) {
+      const still = sampleStill(look.heading);
+      const fw = stillWidth(still) || nativeW;
+      const fh = still.height || nativeH;
+      if (fw < 2 || fh < 2) return;
+      const dx = view.padL + (view.boxW - view.dw) / 2 + look.panX;
+      const dy = view.padT + (view.boxH - view.dh) / 2 + look.panY;
+      const destX = view.padL;
+      const destY = view.padT;
+      const destW = view.boxW;
+      const destH = view.boxH;
+      const sx = clamp((destX - dx) / view.scale, 0, Math.max(0, fw - destW / view.scale));
+      const sy = clamp((destY - dy) / view.scale, 0, Math.max(0, fh - destH / view.scale));
+      const sw = Math.min(fw - sx, destW / view.scale);
+      const sh = Math.min(fh - sy, destH / view.scale);
+      ctx.globalAlpha = 1;
+      ctx.imageSmoothingEnabled = view.scale < 0.999;
+      ctx.imageSmoothingQuality = "low";
+      ctx.drawImage(still, sx, sy, sw, sh, destX, destY, destW, destH);
+    }
+
+    function paintNow() {
+      const view = clampLook();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = "#050403";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      paintFrame(view);
+      canvas.style.cursor = dragging ? "grabbing" : "grab";
     }
 
     function stage() {
@@ -473,49 +500,6 @@ export async function mountLookAround(
         }
       }
       return best;
-    }
-
-    function blitStill(still: Still, view: ReturnType<typeof limits>, alpha: number) {
-      const fw = stillWidth(still) || nativeW;
-      const fh = still.height || nativeH;
-      if (fw < 2 || fh < 2 || alpha <= 0.001) return;
-      const dx = view.padL + (view.boxW - view.dw) / 2 + look.panX;
-      const dy = view.padT + (view.boxH - view.dh) / 2 + look.panY;
-      const destX = view.padL;
-      const destY = view.padT;
-      const destW = view.boxW;
-      const destH = view.boxH;
-      const sx = clamp((destX - dx) / view.scale, 0, Math.max(0, fw - destW / view.scale));
-      const sy = clamp((destY - dy) / view.scale, 0, Math.max(0, fh - destH / view.scale));
-      const sw = Math.min(fw - sx, destW / view.scale);
-      const sh = Math.min(fh - sy, destH / view.scale);
-      ctx.globalAlpha = alpha;
-      ctx.drawImage(still, sx, sy, sw, sh, destX, destY, destW, destH);
-    }
-
-    function paintFrame(view: ReturnType<typeof limits>) {
-      const { a, b, mix } = samplePair(look.heading);
-      ctx.imageSmoothingEnabled = view.scale < 0.999;
-      ctx.imageSmoothingQuality = "low";
-      if (mix < 0.02) {
-        blitStill(a, view, 1);
-      } else if (mix > 0.98) {
-        blitStill(b, view, 1);
-      } else {
-        blitStill(a, view, 1);
-        blitStill(b, view, mix);
-      }
-      ctx.globalAlpha = 1;
-    }
-
-    function paintNow() {
-      const view = clampLook();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = "#050403";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      paintFrame(view);
-      canvas.style.cursor = dragging ? "grabbing" : "grab";
     }
 
     function paintSpot(spot: Spot, view: ReturnType<typeof limits>, hover: boolean) {
