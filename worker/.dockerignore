@@ -1,0 +1,7 @@
+__pycache__/
+.venv/
+work/
+*.ply
+*.sog
+.env
+.env.local
