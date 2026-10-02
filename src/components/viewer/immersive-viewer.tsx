@@ -5,7 +5,7 @@ import Link from "next/link";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PanoramaCanvas } from "@/components/viewer/panorama-canvas";
 import { LookAroundCanvas } from "@/components/viewer/look-around-canvas";
-import { useViewerPhase } from "@/components/viewer/splat-canvas";
+import { SplatCanvas, useViewerPhase } from "@/components/viewer/splat-canvas";
 import { getCatalogRoom } from "@/lib/catalog";
 import { useProject, useProjectsReady } from "@/lib/projects/hooks";
 import { refreshProject } from "@/lib/projects/cache";
@@ -113,14 +113,18 @@ export function ImmersiveViewer({
     project.sourceVideoKey || project.sourceVideoUrl
       ? `/api/reconstructions/${project.id}/video`
       : null;
+  // Prefer the source capture on main. Completed sog is optional and often draft-quality.
+  const sogUrl = !videoUrl ? project.sogUrl : null;
   const panoUrl =
-    !videoUrl && project.panoUrl ? `/api/reconstructions/${project.id}/pano` : null;
-  const mode = videoUrl ? "look" : panoUrl ? "pano" : null;
+    !sogUrl && !videoUrl && project.panoUrl ? `/api/reconstructions/${project.id}/pano` : null;
+  const mode = sogUrl ? "splat" : videoUrl ? "look" : panoUrl ? "pano" : null;
   const canLoad = Boolean(mode);
 
   return (
     <div id="viewer-root" className="viewer-shell">
-      {mode === "pano" && panoUrl ? (
+      {mode === "splat" && sogUrl ? (
+        <SplatCanvas sogUrl={sogUrl} onPhase={onPhase} onResetRef={onResetRef} />
+      ) : mode === "pano" && panoUrl ? (
         <PanoramaCanvas panoUrl={panoUrl} onPhase={onPhase} onResetRef={onResetRef} />
       ) : mode === "look" && videoUrl ? (
         <LookAroundCanvas videoUrl={videoUrl} onPhase={onPhase} onResetRef={onResetRef} />
@@ -134,7 +138,9 @@ export function ImmersiveViewer({
         <div className="viewer-state" role="status">
           <span className="loading-arc" aria-hidden="true" />
           <p className="type-mono">Entering the room</p>
-          <p className="type-caption">Stand on a spot, then look around.</p>
+          <p className="type-caption">
+            {mode === "splat" ? "Drag to look around the reconstructed space." : "Drag to look around."}
+          </p>
         </div>
       ) : null}
 
@@ -143,7 +149,7 @@ export function ImmersiveViewer({
           <p className="type-mono">{!canLoad ? "Environment unavailable" : "Could not open 3D environment"}</p>
           <p className="type-body max-w-md text-center">
             {!canLoad
-              ? "This job has no source capture yet."
+              ? "This job has no reconstructed scene or source capture yet."
               : message || "The 3D environment could not be fetched from storage."}
           </p>
           <Link href={`/projects/${project.id}`} className="btn btn-secondary btn-sm mt-4">
@@ -158,7 +164,11 @@ export function ImmersiveViewer({
         </Link>
         <div className="viewer-tour-title">{project.name}</div>
         {phase === "ready" && hint ? (
-          <p className="viewer-tour-hint">Click a spot to stand there · Drag to look around</p>
+          <p className="viewer-tour-hint">
+            {mode === "splat"
+              ? "Drag to look around · Scroll to move · R resets"
+              : "Drag to look around · R resets"}
+          </p>
         ) : null}
         <div className="viewer-tour-rounds">
           <button

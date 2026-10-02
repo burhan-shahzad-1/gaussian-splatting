@@ -207,14 +207,22 @@ async function mountVideoPhotosphere(
   onError?: (message: string) => void,
 ) {
   video.pause();
-  const mid = Math.max(0, (video.duration || 1) * 0.5);
-  await seek(video, mid);
-  await waitForFrame(video);
+  const duration = Math.max(video.duration || 0, 0.001);
+  // Skip Adobe intro; lock one in-scene equirect frame for a stable centre view.
+  const time = clamp(Math.min(3, duration * 0.2), 0, Math.max(duration - 0.1, 0));
+  const still = await grabFrame(video, time, duration);
   const { mountPanoramaViewer } = await import("@/lib/viewer/panorama");
-  const handle = await mountPanoramaViewer({ canvas, video, spots: true, onReady, onError });
+  const handle = await mountPanoramaViewer({
+    canvas,
+    frame: still,
+    spots: false,
+    onReady,
+    onError,
+  });
   const innerDestroy = handle.destroy;
   handle.destroy = () => {
     innerDestroy();
+    closeStill(still);
     dropLocal();
   };
   return handle;
@@ -281,25 +289,35 @@ export async function mountLookAround(
     const nativeH = video.videoHeight;
     const spots = stationHeadings(duration);
 
-    const first = await grabFrame(video, 0, duration);
-    if (signal?.aborted) {
-      closeStill(first);
-      throw new DOMException("Look-around cancelled.", "AbortError");
+    // Dense still strip + crossfade. Never seek <video> while dragging.
+    const stripCount = clamp(Math.round(duration * 2.5), 24, 72);
+    const strip: Still[] = [];
+    try {
+      for (let index = 0; index < stripCount; index += 1) {
+        if (signal?.aborted) throw new DOMException("Look-around cancelled.", "AbortError");
+        const heading = stripCount <= 1 ? 0.5 : index / (stripCount - 1);
+        const raw = await grabFrame(video, heading * duration, duration);
+        if (typeof createImageBitmap === "function") {
+          try {
+            const bitmap = await createImageBitmap(raw);
+            closeStill(raw);
+            strip.push(bitmap);
+            continue;
+          } catch {
+            /* fall through to raw still */
+          }
+        }
+        strip.push(raw);
+      }
+    } catch (error) {
+      strip.forEach(closeStill);
+      throw error;
     }
-    const last = await grabFrame(video, duration, duration);
-    if (signal?.aborted) {
-      closeStill(first);
-      closeStill(last);
-      throw new DOMException("Look-around cancelled.", "AbortError");
-    }
-    const mid = await grabFrame(video, duration * 0.5, duration);
-    const wrapAround = stillsLoop(first, last) && stillsDiffScore(first, mid) > 18;
-    closeStill(first);
-    closeStill(mid);
-    closeStill(last);
+    const midIndex = Math.floor(strip.length / 2);
+    const wrapAround =
+      stillsLoop(strip[0], strip[strip.length - 1]) && stillsDiffScore(strip[0], strip[midIndex]) > 18;
     video.pause();
 
-    const localSpan = wrapAround ? 0.5 : clamp(0.85 / Math.max(spots.length, 2), 0.05, 0.12);
     const look: Look = { heading: 0.5, panX: 0, panY: 0, zoom: 1 };
     let stand = 0.5;
     let dragging = false;
@@ -324,15 +342,24 @@ export async function mountLookAround(
     let pinchStart = 0;
     let pinchZoom = 1;
 
-    function goTo(time: number) {
-      const target = clamp(time, 0, duration);
-      if (Math.abs(video.currentTime - target) < 1e-4) return;
-      video.currentTime = target;
+    function samplePair(heading: number) {
+      const count = strip.length;
+      if (count <= 1) return { a: strip[0], b: strip[0], mix: 0 };
+      if (wrapAround) {
+        const f = wrap01(heading) * count;
+        const i0 = Math.floor(f) % count;
+        const i1 = (i0 + 1) % count;
+        return { a: strip[i0], b: strip[i1], mix: f - Math.floor(f) };
+      }
+      const f = clamp(heading, 0, 1) * (count - 1);
+      const i0 = Math.floor(f);
+      const i1 = Math.min(i0 + 1, count - 1);
+      return { a: strip[i0], b: strip[i1], mix: f - i0 };
     }
 
     function clampHeading(value: number) {
       if (wrapAround) return wrap01(value);
-      return clamp(value, clamp(stand - localSpan, 0, 1), clamp(stand + localSpan, 0, 1));
+      return clamp(value, 0, 1);
     }
 
     function stage() {
@@ -376,9 +403,7 @@ export async function mountLookAround(
         velH = 0;
       }
       if (!wrapAround && look.heading !== beforeH) {
-        const min = clamp(stand - localSpan, 0, 1);
-        const max = clamp(stand + localSpan, 0, 1);
-        if (look.heading === min || look.heading === max) velH = 0;
+        if (look.heading === 0 || look.heading === 1) velH = 0;
       }
       if (look.panX !== beforeX) velX = 0;
       if (look.panY !== beforeY) velY = 0;
@@ -450,24 +475,47 @@ export async function mountLookAround(
       return best;
     }
 
-    function paintFrame(view: ReturnType<typeof limits>) {
-      const fw = video.videoWidth || nativeW;
-      const fh = video.videoHeight || nativeH;
-      if (fw < 2 || fh < 2) return;
+    function blitStill(still: Still, view: ReturnType<typeof limits>, alpha: number) {
+      const fw = stillWidth(still) || nativeW;
+      const fh = still.height || nativeH;
+      if (fw < 2 || fh < 2 || alpha <= 0.001) return;
       const dx = view.padL + (view.boxW - view.dw) / 2 + look.panX;
       const dy = view.padT + (view.boxH - view.dh) / 2 + look.panY;
-      ctx.imageSmoothingEnabled = view.scale < 0.999;
-      ctx.imageSmoothingQuality = "high";
-      const bleed = 1;
-      const destX = view.padL - bleed;
-      const destY = view.padT - bleed;
-      const destW = view.boxW + bleed * 2;
-      const destH = view.boxH + bleed * 2;
+      const destX = view.padL;
+      const destY = view.padT;
+      const destW = view.boxW;
+      const destH = view.boxH;
       const sx = clamp((destX - dx) / view.scale, 0, Math.max(0, fw - destW / view.scale));
       const sy = clamp((destY - dy) / view.scale, 0, Math.max(0, fh - destH / view.scale));
       const sw = Math.min(fw - sx, destW / view.scale);
       const sh = Math.min(fh - sy, destH / view.scale);
-      ctx.drawImage(video, sx, sy, sw, sh, destX, destY, destW, destH);
+      ctx.globalAlpha = alpha;
+      ctx.drawImage(still, sx, sy, sw, sh, destX, destY, destW, destH);
+    }
+
+    function paintFrame(view: ReturnType<typeof limits>) {
+      const { a, b, mix } = samplePair(look.heading);
+      ctx.imageSmoothingEnabled = view.scale < 0.999;
+      ctx.imageSmoothingQuality = "low";
+      if (mix < 0.02) {
+        blitStill(a, view, 1);
+      } else if (mix > 0.98) {
+        blitStill(b, view, 1);
+      } else {
+        blitStill(a, view, 1);
+        blitStill(b, view, mix);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function paintNow() {
+      const view = clampLook();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = "#050403";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      paintFrame(view);
+      canvas.style.cursor = dragging ? "grabbing" : "grab";
     }
 
     function paintSpot(spot: Spot, view: ReturnType<typeof limits>, hover: boolean) {
@@ -512,7 +560,7 @@ export async function mountLookAround(
         look.heading += velH * dt;
         look.panX += velX * dt;
         look.panY += velY * dt;
-        const decay = Math.exp(-dt / 160);
+        const decay = Math.exp(-dt / 110);
         velH *= decay;
         velX *= decay;
         velY *= decay;
@@ -522,27 +570,18 @@ export async function mountLookAround(
       }
 
       const view = clampLook();
-      goTo(headingTime(look.heading, duration, wrapAround));
       ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = 1;
       ctx.fillStyle = "#050403";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       paintFrame(view);
 
-      const laid = layoutSpots(view);
-      const hovered = hitSpot(hoverX, hoverY, view);
-      if (hoverOnFloor && !hovered && !dragging) {
-        ctx.save();
-        ctx.translate(hoverX, hoverY);
-        ctx.scale(1, 0.38);
-        ctx.beginPath();
-        ctx.arc(0, 0, 14 * view.dpr, 0, Math.PI * 2);
-        ctx.strokeStyle = "rgba(255,255,255,0.55)";
-        ctx.lineWidth = 1.6 * view.dpr;
-        ctx.stroke();
-        ctx.restore();
-      }
-      for (const spot of laid) paintSpot(spot, view, hovered?.heading === spot.heading);
-      canvas.style.cursor = dragging ? "grabbing" : hovered || hoverOnFloor ? "pointer" : "grab";
+      // Main branch: no click-to-stand spots.
+      void layoutSpots;
+      void hitSpot;
+      void paintSpot;
+      hoverOnFloor = false;
+      canvas.style.cursor = dragging ? "grabbing" : "grab";
     }
 
     function standAt(heading: number) {
@@ -640,25 +679,16 @@ export async function mountLookAround(
       const view = limits();
       const dx = event.clientX - startX;
       const dy = event.clientY - startY;
-      if (Math.hypot(dx, dy) > 8) didDrag = true;
+      if (Math.hypot(dx, dy) > 4) didDrag = true;
       const prevH = look.heading;
-      const prevX = look.panX;
       const prevY = look.panY;
-      if (look.zoom > 1.02 && (view.maxPanX > 0 || view.maxPanY > 0)) {
-        look.panX = startPanX + dx * view.dpr;
-        look.panY = startPanY + dy * view.dpr;
-        clampLook();
-        const extraX = dx * view.dpr - (look.panX - startPanX);
-        if (Math.abs(extraX) > 0.5) {
-          look.heading = clampHeading(startHeading + extraX / Math.max(view.boxW, 1));
-        }
-      } else {
-        look.heading = clampHeading(startHeading + dx / Math.max(host.clientWidth * 0.85, 1));
-        look.panY = startPanY + dy * view.dpr;
-      }
+      // Horizontal drag scrubs look-around; vertical only nudges pan.
+      look.heading = clampHeading(startHeading - dx / Math.max(host.clientWidth * 0.48, 1));
+      look.panY = clamp(startPanY + dy * view.dpr * 0.45, -view.maxPanY, view.maxPanY);
       velH = headingDelta(prevH, look.heading, wrapAround) / moveDt;
-      velX = (look.panX - prevX) / moveDt;
+      velX = 0;
       velY = (look.panY - prevY) / moveDt;
+      paintNow();
     }
 
     function onPointerDown(event: PointerEvent) {
@@ -693,7 +723,7 @@ export async function mountLookAround(
       const wasDragging = dragging;
       dragging = pointers.size === 1;
       if (wasDragging && !didDrag && pointers.size === 0 && !walk) {
-        chooseSpot(event);
+        // Main branch keeps look-around only — no floor teleport.
       }
     }
 
@@ -725,8 +755,6 @@ export async function mountLookAround(
     canvas.addEventListener("keydown", onKey);
 
     resize();
-    await seek(video, headingTime(look.heading, duration, wrapAround));
-    await waitForFrame(video);
     lastDraw = performance.now();
     raf = requestAnimationFrame(draw);
     onReady?.();
@@ -744,6 +772,7 @@ export async function mountLookAround(
         canvas.removeEventListener("pointercancel", onPointerUp);
         canvas.removeEventListener("wheel", onWheel);
         canvas.removeEventListener("keydown", onKey);
+        strip.forEach(closeStill);
         dropLocal();
       },
     };

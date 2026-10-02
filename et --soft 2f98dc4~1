@@ -1,0 +1,23 @@
+[33mcommit 01d3123398114155d052d41e0c3bcca196200de8[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m
+Author:     burhan-shahzad-1 <burhanshahzad135@gmail.com>
+AuthorDate: Fri Oct 2 14:50:47 2026 +0500
+Commit:     burhan-shahzad-1 <burhanshahzad135@gmail.com>
+CommitDate: Fri Oct 2 14:50:47 2026 +0500
+
+    Add the local reconstruction studio with MinIO uploads and the restored 360 viewer.
+    
+    Ship the Next.js job API, host draft reconstructor, and video photosphere look-around so a phone walkthrough can be queued and opened in the browser.
+    
+    Co-authored-by: Cursor <cursoragent@cursor.com>
+
+[33mcommit 2f98dc4992fe982c32619007965ec8c94c57b8dc[m
+Author:     burhan-shahzad-1 <burhanshahzad135@gmail.com>
+AuthorDate: Tue Sep 8 16:33:41 2026 +0500
+Commit:     burhan-shahzad-1 <burhanshahzad135@gmail.com>
+CommitDate: Tue Sep 8 16:33:41 2026 +0500
+
+    Scaffold the Next.js studio for a single-room reconstruction proof of concept.
+    
+    Keep COLMAP, Gaussian Splatting, and CUDA off the web server until a GPU worker exists.
+    
+    Co-authored-by: Cursor <cursoragent@cursor.com>
